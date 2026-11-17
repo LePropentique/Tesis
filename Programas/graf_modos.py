@@ -226,6 +226,342 @@ def trazas_cilindro(regiones, N, max_modos=None, refinar=1):
     return trazas, zmax
 
 
+def profundidades(H, niveles=(0.9, 0.99, 0.999), peso_min=0.1):
+    """
+    Contornos de los pétalos de altura de una región.
+    Para cada modo m (fila de H), p_m(x) = H[m][x] / 2 es una distribución sobre los sitios de
+    la región. La región se parte por la mitad: el lado izquierdo pertenece al primer corte y
+    el derecho al segundo. En cada lado, la profundidad del nivel l es la distancia al corte
+    (en sitios, con interpolación lineal dentro de cada sitio) que encierra la fracción l del
+    peso que el modo tiene en ese lado. Si un lado tiene menos de peso_min del peso del modo,
+    el modo no tiene pétalo en ese corte (None).
+    Devuelve P[lado][nivel][m], con lado 0 = primer corte y 1 = segundo corte.
+    """
+    import numpy as np
+    H = np.asarray(H, dtype=float)
+    n = H.shape[1]
+    mitad = n // 2
+    P = [[[None] * len(H) for _ in niveles] for _ in range(2)]
+    for m, fila in enumerate(H):
+        p = fila / fila.sum()
+        lados = (p[:mitad], p[mitad:][::-1])        # ordenados desde su corte hacia adentro
+        for s, q in enumerate(lados):
+            w = q.sum()
+            if w < peso_min:
+                continue
+            G = np.concatenate([[0.0], np.cumsum(q / w)])   # G[j] = peso hasta la distancia j
+            for i, l in enumerate(niveles):
+                j = min(int(np.searchsorted(G, l)), len(q))    # G[j-1] < l <= G[j]
+                dentro = (l - G[j - 1]) / (G[j] - G[j - 1]) if G[j] > G[j - 1] else 1.0
+                P[s][i][m] = (j - 1) + dentro
+    return P
+
+
+COLORES_PETALOS = {          # por región: del nivel más bajo (fuerte) al más alto (claro)
+    0: ["#1f5fae", "#6fa3e0", "#c5daf3", "#e6eef9"],
+    1: ["#c4511f", "#f0965f", "#f9d3b8", "#fcebdf"],
+    2: ["#237a37", "#6cc07f", "#c8ead0", "#e5f5e8"],
+}
+GRISES_PETALOS = ["#3d3d3a", "#8a8984", "#c9c8c2", "#e4e3de"]
+
+
+def _suavizar(valores):
+    """Promedio (1/4, 1/2, 1/4) de cada valor con sus vecinos, dentro de cada tramo sin None;
+    en los extremos de un tramo, (2/3, 1/3) con el único vecino."""
+    suave = list(valores)
+    for i, v in enumerate(valores):
+        if v is None:
+            continue
+        izq = valores[i - 1] if i > 0 else None
+        der = valores[i + 1] if i + 1 < len(valores) else None
+        if izq is not None and der is not None:
+            suave[i] = (izq + 2 * v + der) / 4
+        elif izq is not None or der is not None:
+            suave[i] = (2 * v + (izq if izq is not None else der)) / 3
+    return suave
+
+
+def _sector(a0, a1, r0, r1, puntos=8):
+    """Polígono (xs, ys) de un sector de anillo entre los ángulos a0, a1 y los radios r0, r1."""
+    import numpy as np
+    ang = np.linspace(a0, a1, max(2, puntos))
+    xs = list(r1 * np.cos(ang)) + list(r0 * np.cos(ang[::-1]))
+    ys = list(r1 * np.sin(ang)) + list(r0 * np.sin(ang[::-1]))
+    return xs + [xs[0], None], ys + [ys[0], None]
+
+
+def figura_petalos(regiones, N, niveles=(0.9, 0.99, 0.999), titulo="", max_modos=None,
+                   peso_min=0.1, lineas=True):
+    """
+    Pétalos de altura en 2D, vistos desde arriba (misma geometría que el cilindro: ángulo =
+    sitio, radio = modo, el modo 0 afuera). Cada anillo es un sector de corona; desde cada corte
+    hacia adentro se rellenan bandas tipo mapa topográfico: de 0 al primer nivel (color fuerte),
+    del primero al segundo (medio), etc. (ver profundidades). Lo que queda en gris muy claro está
+    más allá del último nivel. Sin interpolar entre modos.
+    lineas: además, una curva suave en cada frontera entre bandas. Es solo una guía visual: la
+    profundidad de cada anillo se promedia con la de sus vecinos (pesos 1/4, 1/2, 1/4) y la
+    curva se traza con una spline; las bandas de color siguen siendo los datos de cada anillo.
+    regiones: lista de (nombre, H, C, sitios), como en trazas_cilindro.
+    """
+    import numpy as np
+    k_reg = [len(H) if max_modos is None else min(len(H), max_modos) for _, H, _, _ in regiones]
+    kmax = max(k_reg)
+    R_ext, R_int = 1.0, 0.35                          # igual que en trazas_cilindro
+    paso = (R_ext - R_int) / max(kmax - 1, 1)
+    medio = paso / 2
+    niveles = tuple(sorted(niveles))
+    etiquetas = [f"0–{100 * niveles[0]:g} %"] + [f"{100 * a:g}–{100 * b:g} %"
+                                                  for a, b in zip(niveles, niveles[1:])]
+    fig = go.Figure()
+
+    for r, ((nombre, H, _, sitios), k) in enumerate(zip(regiones, k_reg)):
+        colores = COLORES_PETALOS[r % 3]
+        n = len(sitios)
+        a_ini = 2 * np.pi * (min(sitios) - 1) / N     # primer corte
+        a_fin = 2 * np.pi * max(sitios) / N           # segundo corte
+        # Fondo de la región: más allá del último nivel
+        xs, ys = [], []
+        for m in range(k):
+            rad = R_ext - m * paso
+            x, y = _sector(a_ini, a_fin, rad - medio, rad + medio, puntos=max(8, n))
+            xs += x; ys += y
+        fig.add_trace(go.Scatter(x=xs, y=ys, fill="toself", fillcolor=colores[3],
+                                 line=dict(width=0.6, color=colores[3]), mode="lines",
+                                 hoverinfo="skip", showlegend=False))
+        # Bandas
+        P = profundidades(H[:k], niveles, peso_min)
+        bandas = [([], []) for _ in niveles]
+        marcas_x, marcas_y, marcas_t = [], [], []
+        for s, (corte, signo) in enumerate(((a_ini, 1), (a_fin, -1))):
+            for m in range(k):
+                if P[s][0][m] is None:
+                    continue
+                rad = R_ext - m * paso
+                d_prev = 0.0
+                for b in range(len(niveles)):
+                    d = P[s][b][m]
+                    a0 = corte + signo * 2 * np.pi * d_prev / N
+                    a1 = corte + signo * 2 * np.pi * d / N
+                    x, y = _sector(a0, a1, rad - medio, rad + medio)
+                    bandas[b][0].extend(x); bandas[b][1].extend(y)
+                    ang = (a0 + a1) / 2
+                    marcas_x.append(rad * np.cos(ang)); marcas_y.append(rad * np.sin(ang))
+                    marcas_t.append(f"Región {nombre}, modo {m}, "
+                                    f"{'primer' if s == 0 else 'segundo'} corte<br>"
+                                    f"{etiquetas[b]} del peso: de {d_prev:.2f} a {d:.2f} sitios")
+                    d_prev = d
+        for b, (xs, ys) in enumerate(bandas):
+            fig.add_trace(go.Scatter(x=xs, y=ys, fill="toself", fillcolor=colores[b],
+                                     line=dict(width=0.6, color=colores[b]), mode="lines",
+                                     hoverinfo="skip", showlegend=False))
+        # Curvas de contorno suaves en cada frontera entre bandas
+        if lineas:
+            for s, (corte, signo) in enumerate(((a_ini, 1), (a_fin, -1))):
+                for b in range(len(niveles)):
+                    xs, ys = [], []
+                    suave = _suavizar(P[s][b])
+                    for m in range(k):
+                        d = suave[m]
+                        if d is None:
+                            xs.append(None); ys.append(None)
+                            continue
+                        rad = R_ext - m * paso
+                        ang = corte + signo * 2 * np.pi * d / N
+                        xs.append(rad * np.cos(ang)); ys.append(rad * np.sin(ang))
+                    fig.add_trace(go.Scatter(x=xs, y=ys, mode="lines", hoverinfo="skip",
+                                             showlegend=False,
+                                             line=dict(color="#2b2b28", width=1.3,
+                                                       shape="spline", smoothing=0.8)))
+        # Marcas invisibles, solo para ver los números al pasar el mouse
+        fig.add_trace(go.Scatter(x=marcas_x, y=marcas_y, mode="markers", text=marcas_t,
+                                 hoverinfo="text", marker=dict(size=6, opacity=0),
+                                 showlegend=False))
+        # Cortes y nombre de la región
+        for a in (a_ini, a_fin):
+            fig.add_trace(go.Scatter(x=[(R_int - medio) * np.cos(a), 1.08 * np.cos(a)],
+                                     y=[(R_int - medio) * np.sin(a), 1.08 * np.sin(a)],
+                                     mode="lines", line=dict(color="#383835", width=2),
+                                     hoverinfo="skip", showlegend=False))
+        a_med = 2 * np.pi * ((min(sitios) + max(sitios)) / 2 - 0.5) / N
+        fig.add_trace(go.Scatter(x=[1.18 * np.cos(a_med)], y=[1.18 * np.sin(a_med)],
+                                 mode="text", text=[nombre], textfont=dict(size=18),
+                                 hoverinfo="skip", showlegend=False))
+
+    # Leyenda (en grises: el mismo significado para las tres regiones)
+    for b, etiqueta in enumerate(etiquetas + [f"más de {100 * niveles[-1]:g} %"]):
+        fig.add_trace(go.Scatter(x=[None], y=[None], mode="markers", name=etiqueta,
+                                 marker=dict(symbol="square", size=14,
+                                             color=GRISES_PETALOS[min(b, 3)])))
+    lim = 1.3
+    fig.update_layout(
+        title=dict(text=titulo, x=0.5), plot_bgcolor="white", paper_bgcolor="white",
+        xaxis=dict(visible=False, range=[-lim, lim]),
+        yaxis=dict(visible=False, range=[-lim, lim], scaleanchor="x"),
+        legend=dict(title="peso desde el corte", x=1.0, y=0.5, xanchor="left"),
+        margin=dict(l=10, r=10, t=50, b=10), width=950, height=800)
+    return fig
+
+
+def profundidades_radiales(H, niveles=(0.9, 0.99, 0.999)):
+    """
+    Pétalos a ángulo constante. Por ortogonalidad de O_R, cada columna de H suma 2:
+    q_x(m) = H[m][x] / 2 es una distribución sobre los modos para cada sitio x (la fracción del
+    sitio x que lleva el modo m). Acumulando desde el modo 0 (el más entrelazado, anillo
+    exterior) hacia adentro, el nivel l se alcanza en el "anillo" t_l(x): el anillo m ocupa el
+    intervalo [m, m + 1) y se interpola linealmente dentro de él.
+    H debe tener todos los modos de la región (si no, la suma no llega a 1).
+    Devuelve T[nivel][x] (float entre 0 y el número de modos).
+    """
+    import numpy as np
+    H = np.asarray(H, dtype=float)
+    q = H / H.sum(axis=0, keepdims=True)
+    Q = np.vstack([np.zeros(H.shape[1]), np.cumsum(q, axis=0)])   # Q[m] = peso antes del anillo m
+    T = []
+    for l in niveles:
+        fila = []
+        for x in range(H.shape[1]):
+            m = min(int(np.searchsorted(Q[:, x], l)), H.shape[0])     # Q[m-1] < l <= Q[m]
+            dentro = (l - Q[m - 1, x]) / (Q[m, x] - Q[m - 1, x]) if Q[m, x] > Q[m - 1, x] else 1.0
+            fila.append((m - 1) + dentro)
+        T.append(fila)
+    return T
+
+
+def figura_petalos_sitio(regiones, N, niveles=(0.9, 0.99, 0.999), titulo="", max_modos=None,
+                         lineas=True):
+    """
+    Pétalos a ángulo constante, en 2D vistos desde arriba (misma geometría que el cilindro).
+    Para cada sitio (sector angular), desde el anillo exterior hacia adentro se rellenan bandas
+    tipo mapa topográfico: hasta el anillo donde se acumula el primer nivel del peso del sitio
+    (color fuerte), del primero al segundo (medio), etc. (ver profundidades_radiales).
+    Si un nivel cae más allá del último anillo dibujado (max_modos), en el borde interior de ese
+    sitio se dibuja una franja gris: oscura si ya el primer nivel queda fuera, más clara si solo
+    los siguientes.
+    lineas: curvas suaves en las fronteras entre bandas (guía visual: la posición de cada sitio
+    se promedia con la de sus vecinos y se traza con una spline).
+    regiones: lista de (nombre, H, C, sitios) con TODOS los modos de cada región.
+    """
+    import numpy as np
+    k_reg = [len(H) if max_modos is None else min(len(H), max_modos) for _, H, _, _ in regiones]
+    kmax = max(k_reg)
+    R_ext, R_int = 1.0, 0.35                          # igual que en trazas_cilindro
+    paso = (R_ext - R_int) / max(kmax - 1, 1)
+    borde_ext = R_ext + paso / 2                      # radio del borde exterior del anillo 0
+    radio = lambda t: borde_ext - t * paso            # posición t (en anillos) -> radio
+    niveles = tuple(sorted(niveles))
+    etiquetas = [f"0–{100 * niveles[0]:g} %"] + [f"{100 * a:g}–{100 * b:g} %"
+                                                  for a, b in zip(niveles, niveles[1:])]
+    fig = go.Figure()
+
+    for r, ((nombre, H, _, sitios), k) in enumerate(zip(regiones, k_reg)):
+        colores = COLORES_PETALOS[r % 3]
+        sitios = list(sitios)
+        T = profundidades_radiales(H, niveles)
+        borde_int = radio(k)
+        bordes = [2 * np.pi * (x - 1) / N for x in sitios] + [2 * np.pi * sitios[-1] / N]
+        # Fondo: más allá del último nivel
+        x, y = _sector(bordes[0], bordes[-1], borde_int, borde_ext, puntos=max(8, len(sitios)))
+        fig.add_trace(go.Scatter(x=x, y=y, fill="toself", fillcolor=colores[3],
+                                 line=dict(width=0.6, color=colores[3]), mode="lines",
+                                 hoverinfo="skip", showlegend=False))
+        bandas = [([], []) for _ in niveles]
+        fuera = [([], []) for _ in niveles]
+        marcas_x, marcas_y, marcas_t = [], [], []
+        for i in range(len(sitios)):
+            a0, a1 = bordes[i], bordes[i + 1]
+            t_prev = 0.0
+            for b in range(len(niveles)):
+                t = min(T[b][i], k)
+                if t > t_prev:
+                    xs, ys = _sector(a0, a1, radio(t), radio(t_prev), puntos=3)
+                    bandas[b][0].extend(xs); bandas[b][1].extend(ys)
+                t_prev = t
+            primero_fuera = next((b for b in range(len(niveles)) if T[b][i] > k), None)
+            if primero_fuera is not None:
+                xs, ys = _sector(a0, a1, borde_int - 0.045, borde_int - 0.01, puntos=3)
+                fuera[primero_fuera][0].extend(xs); fuera[primero_fuera][1].extend(ys)
+            ang = (a0 + a1) / 2
+            marcas_x.append(radio(min(T[0][i], k) / 2) * np.cos(ang))
+            marcas_y.append(radio(min(T[0][i], k) / 2) * np.sin(ang))
+            marcas_t.append(f"Región {nombre}, sitio {sitios[i]}<br>" + "<br>".join(
+                f"{100 * l:g} % del sitio en los anillos 0–{T[b][i]:.2f}"
+                + (f"  (más allá del anillo {k - 1} dibujado)" if T[b][i] > k else "")
+                for b, l in enumerate(niveles)))
+        for b, (xs, ys) in enumerate(bandas):
+            fig.add_trace(go.Scatter(x=xs, y=ys, fill="toself", fillcolor=colores[b],
+                                     line=dict(width=0.6, color=colores[b]), mode="lines",
+                                     hoverinfo="skip", showlegend=False))
+        for b, (xs, ys) in enumerate(fuera):
+            if xs:
+                fig.add_trace(go.Scatter(x=xs, y=ys, fill="toself",
+                                         fillcolor=GRISES_PETALOS[min(b, 3)],
+                                         line=dict(width=0.6, color=GRISES_PETALOS[min(b, 3)]),
+                                         mode="lines", hoverinfo="skip", showlegend=False))
+        if lineas:
+            angs = [(bordes[i] + bordes[i + 1]) / 2 for i in range(len(sitios))]
+            for b in range(len(niveles)):
+                dentro = [T[b][i] if T[b][i] <= k else None for i in range(len(sitios))]
+                suave = _suavizar(dentro)
+                xs = [None if t is None else radio(t) * np.cos(a) for t, a in zip(suave, angs)]
+                ys = [None if t is None else radio(t) * np.sin(a) for t, a in zip(suave, angs)]
+                fig.add_trace(go.Scatter(x=xs, y=ys, mode="lines", hoverinfo="skip",
+                                         showlegend=False,
+                                         line=dict(color="#2b2b28", width=1.3, shape="spline",
+                                                   smoothing=0.8)))
+        fig.add_trace(go.Scatter(x=marcas_x, y=marcas_y, mode="markers", text=marcas_t,
+                                 hoverinfo="text", marker=dict(size=6, opacity=0),
+                                 showlegend=False))
+        for a in (bordes[0], bordes[-1]):
+            fig.add_trace(go.Scatter(x=[(borde_int - 0.05) * np.cos(a), 1.08 * np.cos(a)],
+                                     y=[(borde_int - 0.05) * np.sin(a), 1.08 * np.sin(a)],
+                                     mode="lines", line=dict(color="#383835", width=2),
+                                     hoverinfo="skip", showlegend=False))
+        a_med = 2 * np.pi * ((sitios[0] + sitios[-1]) / 2 - 0.5) / N
+        fig.add_trace(go.Scatter(x=[1.18 * np.cos(a_med)], y=[1.18 * np.sin(a_med)],
+                                 mode="text", text=[nombre], textfont=dict(size=18),
+                                 hoverinfo="skip", showlegend=False))
+
+    for b, etiqueta in enumerate(etiquetas + [f"más de {100 * niveles[-1]:g} %"]):
+        fig.add_trace(go.Scatter(x=[None], y=[None], mode="markers", name=etiqueta,
+                                 marker=dict(symbol="square", size=14,
+                                             color=GRISES_PETALOS[min(b, 3)])))
+    fig.add_trace(go.Scatter(x=[None], y=[None], mode="markers",
+                             name="franja interior: nivel más allá<br>del último anillo",
+                             marker=dict(symbol="line-ew", size=14,
+                                         line=dict(width=4, color=GRISES_PETALOS[0]))))
+    lim = 1.3
+    fig.update_layout(
+        title=dict(text=titulo, x=0.5), plot_bgcolor="white", paper_bgcolor="white",
+        xaxis=dict(visible=False, range=[-lim, lim]),
+        yaxis=dict(visible=False, range=[-lim, lim], scaleanchor="x"),
+        legend=dict(title="peso del sitio, desde<br>el anillo exterior", x=1.0, y=0.5,
+                    xanchor="left"),
+        margin=dict(l=10, r=10, t=50, b=10), width=950, height=800)
+    return fig
+
+
+def graficar_petalos_sitio(regiones, N, niveles=(0.9, 0.99, 0.999), titulo="", archivo=None,
+                           max_modos=None, lineas=True):
+    """Pétalos a ángulo constante (ver figura_petalos_sitio): los guarda en 'archivo' (.html)
+    o, si no se da, los muestra."""
+    fig = figura_petalos_sitio(regiones, N, niveles, titulo, max_modos, lineas)
+    if archivo:
+        fig.write_html(archivo)
+    else:
+        fig.show()
+
+
+def graficar_petalos(regiones, N, niveles=(0.9, 0.99, 0.999), titulo="", archivo=None,
+                     max_modos=None, peso_min=0.1, lineas=True):
+    """Pétalos de altura en 2D (ver figura_petalos): los guarda en 'archivo' (.html) o, si no
+    se da, los muestra."""
+    fig = figura_petalos(regiones, N, niveles, titulo, max_modos, peso_min, lineas)
+    if archivo:
+        fig.write_html(archivo)
+    else:
+        fig.show()
+
+
 def _layout_cilindro(titulo, zmax):
     sin_eje = dict(showticklabels=False, title="", showgrid=False, zeroline=False,
                    showbackground=False)

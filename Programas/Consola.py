@@ -5,6 +5,7 @@ Cada botón encadena los programas que hagan falta:
     1. hamiltoniano            -> Resultados_Ham_Solver/dps<n>
     2. matriz de covarianza    -> Resultados_covariance_matrix/dps<n>
     3. diagonalización local   -> Resultados_diag_local/dps<n>
+       (y, para los botones "Diagonalización off-diag", diag_off -> Resultados_diag_off/dps<n>)
     4. gráfica                 -> Resultados_modos  o  Resultados_matrices
 
 Pestaña "Tripartito" (gamma, h, N, NA, NB, NC, dps):
@@ -12,15 +13,22 @@ Pestaña "Tripartito" (gamma, h, N, NA, NB, NC, dps):
     Graficar matriz          W_tilde reducida, escala log y lineal   (graf_matrix)
     Graficar grafos          grafos de acoplamientos, modos y Majoranas   (graf_matrix)
     Biparticiones asociadas  A|BC, B|CA y AB|C: gráfica cilíndrica y W_tilde reducida de cada una
+    Diagonalización off-diag los tres bloques cruzados lo más diagonales posible, a la vez
+                             (diag_off); W_tilde reducida en esa base, escala log
 Pestaña "Bipartito" (gamma, h, N, NS, dps), con S = sitios 1..NS y T = el resto:
     Graficar modos           gráfica cilíndrica de S | T
     Graficar matriz          W_tilde reducida, escala log y lineal
+    Diagonalización off-diag bloque cruzado S-T diagonal (exacto, diag_off); W_tilde reducida
 Pestaña "Barrido": recorre varios valores de h, de gamma o de la partición (uno a la vez)
 y arma una sola gráfica cilíndrica con un deslizador sobre ese parámetro.
 Pestaña "Diagrama de fases" (N y partición fijos): diagrama (gamma, h) con un punto por caso.
     Al pasar el mouse muestra las fotos del caso más cercano (cilindro y W_tilde reducida);
     al hacer clic abre el cilindro 3D. Reutiliza lo ya calculado (ver elegir_dps) y calcula
     con dps_nuevo los puntos de la malla que falten. Las fotos van a Resultados_fotos.
+    La flecha del recuadro del cilindro recorre tres vistas: el cilindro, los pétalos por
+    anillo (peso de cada anillo acumulado desde cada corte, graf_modos.figura_petalos) y los
+    pétalos por sitio (peso de cada sitio acumulado desde el anillo exterior,
+    graf_modos.figura_petalos_sitio). El clic abre la versión interactiva de la vista activa.
 
 Si un resultado ya existe en su carpeta dps<n>, se reutiliza en lugar de recalcularlo.
 
@@ -49,6 +57,7 @@ MODULOS = {
     "diag": "diag_local",
     "graf": "graf_modos",
     "mat": "graf_matrix",
+    "off": "diag_off",
 }
 
 PROGRAMAS = os.path.dirname(os.path.abspath(__file__))
@@ -316,6 +325,66 @@ def correr_bip_matriz(gamma, h, N, NS, dps, k=8, log=print, **_):
                                  None, 1, log)
 
 
+def _diag_off(gamma, h, N, nombre, regiones, etiquetas, sufijo, dps, log):
+    """Pasos 1 a 3 y la diagonalización off-diag (diag_off) de una partición, con (regiones,
+    etiquetas, sufijo) como los devuelven diag_local.triparticion y diag_local.biparticion.
+    Si ya está guardada en Resultados_diag_off/dps<n>, no la repite.
+    Devuelve (prefijo, info), con info como en diag_off.leer_info."""
+    off = _modulo("off")
+    from mpmath import mp
+    mp.dps = dps
+    prefijo = f"{_modulo('diag').base_caso(gamma, h, N)}_{sufijo}"
+    if off.ya_calculado(prefijo, etiquetas, dps):
+        log(f"   [1-3] {nombre}: diagonalización off-diag ya calculada en dps{dps}, la leo.")
+        return prefijo, off.leer_info(prefijo, dps)
+    # Base de partida: la de Williamson de cada región (se calcula si hace falta)
+    O = preparar_particiones(gamma, h, N, [(nombre, regiones, etiquetas, sufijo)], dps, log)[0]
+    M = preparar_covarianza(gamma, h, N, dps, log)
+    log(f"   [3/4] Diagonalización off-diag {nombre}: calculando...")
+    return off.diag_off_particion(gamma, h, N, regiones, etiquetas, sufijo, dps, M=M,
+                                  O_inicial=O, log=lambda m: log("         " + m))
+
+
+def _matriz_off(prefijo, info, tamaños, etiquetas, dps, k, datos, log):
+    """W_tilde reducida (escala log, la misma de "Graficar matriz") en la base de diag_off.
+    Guarda Resultados_matrices/<prefijo>_dps<dps>_off_W_reducida_k<k>.html."""
+    off, mat = _modulo("off"), _modulo("mat")
+    W = mat.W_tilde(off.leer_Mtilde(prefijo, dps), *tamaños)
+    Wk, k = mat.reducir_regiones(W, tamaños, k)
+    log(f"   [4/4] Matriz reducida en la base off-diag ({k} posiciones por región)...")
+    salida = os.path.join(PROGRAMAS, "Resultados_matrices")
+    os.makedirs(salida, exist_ok=True)
+    archivo = os.path.join(salida, f"{prefijo}_dps{dps}_off_W_reducida_k{k}.html")
+    mat.graficar_reducida(
+        Wk, k, None, archivo=archivo, etiquetas=etiquetas,
+        titulo=f"W̃ reducida, diagonalización off-diag:  fuera de la diagonal j = "
+               f"{float(info['j_final']):.3g}  (Williamson: {float(info['j_inicial']):.3g})"
+               f"<br>({datos}, {k} posiciones por región)")
+    return _anotar([archivo], log)
+
+
+def correr_off(gamma, h, N, NA, NB, NC, dps, k=8, log=print, **_):
+    """Tripartito, "Diagonalización off-diag": los tres bloques cruzados a la vez (aproximado),
+    y la W_tilde reducida en esa base."""
+    if NA + NB + NC != N:
+        raise ValueError(f"NA + NB + NC = {NA + NB + NC}, pero N = {N}.")
+    regiones, etiquetas, sufijo = _modulo("diag").triparticion(N, NA, NB)
+    prefijo, info = _diag_off(gamma, h, N, f"A|B|C = {NA}|{NB}|{NC}", regiones, etiquetas,
+                              sufijo, dps, log)
+    return _matriz_off(prefijo, info, (NA, NB, NC), etiquetas, dps, k,
+                       f"γ={gamma}, h={h}, N={N}, A|B|C = {NA}|{NB}|{NC}, dps={dps}", log)
+
+
+def correr_bip_off(gamma, h, N, NS, dps, k=8, log=print, **_):
+    """Bipartito, "Diagonalización off-diag": el bloque cruzado S-T diagonal (exacto), y la
+    W_tilde reducida en esa base."""
+    regiones, etiquetas, sufijo = _modulo("diag").biparticion(N, 0, NS)
+    prefijo, info = _diag_off(gamma, h, N, f"S|T = {NS}|{N - NS}", regiones, etiquetas, sufijo,
+                              dps, log)
+    return _matriz_off(prefijo, info, (NS, N - NS), ("S", "T"), dps, k,
+                       f"γ={gamma}, h={h}, N={N}, S | T = {NS}|{N - NS}, dps={dps}", log)
+
+
 # ---------------------------------------------------------------------------
 # Barrido
 # ---------------------------------------------------------------------------
@@ -493,29 +562,69 @@ def puntos_diagrama(N, NA, NB, NC, gammas, hs, dps_nuevo=150, dps_min=70, dps_mi
     return puntos
 
 
-def rutas_caso(gamma, h, N, NA, NB, NC, dps, max_modos, k):
-    """(foto del cilindro, foto de la matriz reducida, cilindro 3D .html) de un punto."""
+def _sufijo_niveles(niveles):
+    """(0.9, 0.99, 0.999) -> '90-99-99.9'."""
+    return "-".join(f"{100 * l:g}" for l in niveles)
+
+
+def rutas_caso(gamma, h, N, NA, NB, NC, dps, max_modos, k, niveles=(0.9, 0.99, 0.999)):
+    """Archivos de un punto del diagrama:
+        cil, mat, pet       fotos del cilindro, de la W_tilde reducida y de los pétalos (2D)
+        sit                 foto de los pétalos a ángulo constante (por sitio)
+        html_cil, html_pet, html_sit  versiones interactivas."""
     _, prefijo = _nombres(gamma, h, N, NA, NB, NC)
     fotos = os.path.join(PROGRAMAS, "Resultados_fotos")
-    return (os.path.join(fotos, f"{prefijo}_dps{dps}_cilindro_m{max_modos}.png"),
-            os.path.join(fotos, f"{prefijo}_dps{dps}_W_reducida_k{k}.png"),
-            os.path.join(PROGRAMAS, "Resultados_modos", f"{prefijo}_dps{dps}_ABC_cilindro.html"))
+    modos = os.path.join(PROGRAMAS, "Resultados_modos")
+    base = f"{prefijo}_dps{dps}"
+    niv = _sufijo_niveles(niveles)
+    return dict(cil=os.path.join(fotos, f"{base}_cilindro_m{max_modos}.png"),
+                mat=os.path.join(fotos, f"{base}_W_reducida_k{k}.png"),
+                pet=os.path.join(fotos, f"{base}_petalos_m{max_modos}_{niv}.png"),
+                html_cil=os.path.join(modos, f"{base}_ABC_cilindro.html"),
+                html_pet=os.path.join(modos, f"{base}_ABC_petalos_m{max_modos}_{niv}.html"),
+                sit=os.path.join(fotos, f"{base}_petalos_sitio_m{max_modos}_{niv}.png"),
+                html_sit=os.path.join(modos, f"{base}_ABC_petalos_sitio_m{max_modos}_{niv}.html"))
 
 
-def preparar_fotos(gamma, h, N, NA, NB, NC, dps, max_modos=30, k=8, log=print):
-    """Fotos (PNG, del tamaño TAM_FOTO) del cilindro y de la W_tilde reducida (escala log) de un
-    caso ya diagonalizado. Solo hace las que falten. Requiere kaleido."""
-    foto_cil, foto_mat, _ = rutas_caso(gamma, h, N, NA, NB, NC, dps, max_modos, k)
-    os.makedirs(os.path.dirname(foto_cil), exist_ok=True)
+def fotos_listas(rutas):
+    return all(os.path.exists(rutas[c]) for c in ("cil", "mat", "pet", "sit"))
+
+
+def _titulo_caso(gamma, h, N, NA, NB, NC, dps):
+    return f"γ={gamma}, h={h}, N={N}, A|B|C = {NA}|{NB}|{NC}, dps={dps}"
+
+
+def preparar_fotos(gamma, h, N, NA, NB, NC, dps, max_modos=30, k=8, niveles=(0.9, 0.99, 0.999),
+                   log=print):
+    """Fotos (PNG, del tamaño TAM_FOTO) de un caso ya diagonalizado: el cilindro, la W_tilde
+    reducida (escala log) y los pétalos en 2D (por anillo y por sitio). Solo hace las que faltan.
+    Requiere kaleido."""
+    rutas = rutas_caso(gamma, h, N, NA, NB, NC, dps, max_modos, k, niveles)
+    os.makedirs(os.path.dirname(rutas["cil"]), exist_ok=True)
     ancho, alto = TAM_FOTO
-    if not os.path.exists(foto_cil):
+    regiones = None
+    if not all(os.path.exists(rutas[c]) for c in ("cil", "pet", "sit")):
         O = preparar_caso(gamma, h, N, NA, NB, NC, dps, log=lambda m: None)
-        fig = _modulo("graf").figura_cilindro(regiones_para_grafica(O, N, NA, NB, NC, max_modos),
-                                              N, max_modos=max_modos)
+        regiones = regiones_para_grafica(O, N, NA, NB, NC)      # todos los modos
+    graf = _modulo("graf")
+    if not os.path.exists(rutas["cil"]):
+        fig = graf.figura_cilindro(regiones, N, max_modos=max_modos)
         fig.update_layout(title=None, width=ancho, height=alto, margin=dict(l=0, r=0, t=0, b=0),
                           font=dict(size=10))
-        fig.write_image(foto_cil)
-    if not os.path.exists(foto_mat):
+        fig.write_image(rutas["cil"])
+    if not os.path.exists(rutas["pet"]):
+        fig = graf.figura_petalos(regiones, N, niveles, max_modos=max_modos)
+        fig.update_layout(title=None, width=ancho, height=alto, font=dict(size=9),
+                          margin=dict(l=0, r=0, t=0, b=0),
+                          legend=dict(title=None, x=0.0, y=0.0, xanchor="left", yanchor="bottom",
+                                      bgcolor="rgba(255,255,255,0.7)"))
+        fig.write_image(rutas["pet"])
+    if not os.path.exists(rutas["sit"]):
+        fig = graf.figura_petalos_sitio(regiones, N, niveles, max_modos=max_modos)
+        fig.update_layout(title=None, width=ancho, height=alto, font=dict(size=9),
+                          margin=dict(l=0, r=0, t=0, b=0), showlegend=False)
+        fig.write_image(rutas["sit"])
+    if not os.path.exists(rutas["mat"]):
         mat = _modulo("mat")
         M_tilde, _, _ = mat.leer_caso(gamma, h, N, NA, NB, dps)
         Wk, kk = mat.reducir(mat.W_tilde(M_tilde, NA, NB, NC), NA, NB, NC, k)
@@ -524,17 +633,39 @@ def preparar_fotos(gamma, h, N, NA, NB, NC, dps, max_modos=30, k=8, log=print):
                           margin=dict(l=40, r=10, t=40, b=10),
                           xaxis=dict(title=None), yaxis=dict(title=None))
         fig.update_traces(colorbar=dict(thickness=10, title=None))
-        fig.write_image(foto_mat)
-    return foto_cil, foto_mat
+        fig.write_image(rutas["mat"])
+    return rutas
 
 
 def correr_cilindro_punto(gamma, h, N, NA, NB, NC, dps, max_modos=30, log=print, **_):
-    """Clic en el diagrama: el cilindro 3D del punto. Reutiliza el .html si ya existe."""
-    html = rutas_caso(gamma, h, N, NA, NB, NC, dps, max_modos, 0)[2]
+    """Clic en el diagrama (vista cilindro): el cilindro 3D del punto. Reutiliza el .html si
+    ya existe."""
+    html = rutas_caso(gamma, h, N, NA, NB, NC, dps, max_modos, 0)["html_cil"]
     if os.path.exists(html):
         log(f"   Ya existe: Resultados_modos/{os.path.basename(html)}")
         return [html]
     return correr_caso(gamma, h, N, NA, NB, NC, dps, max_modos=max_modos, log=log)
+
+
+def correr_petalos_punto(gamma, h, N, NA, NB, NC, dps, max_modos=30, niveles=(0.9, 0.99, 0.999),
+                         por="anillo", log=print, **_):
+    """Clic en el diagrama (vistas de pétalos): los pétalos en 2D, interactivos (al pasar el
+    mouse se ven los números). por = "anillo" (acumulando sobre los sitios de cada anillo) o
+    "sitio" (acumulando sobre los anillos, a ángulo constante). Reutiliza el .html si existe."""
+    rutas = rutas_caso(gamma, h, N, NA, NB, NC, dps, max_modos, 0, niveles)
+    html = rutas["html_sit"] if por == "sitio" else rutas["html_pet"]
+    if os.path.exists(html):
+        log(f"   Ya existe: Resultados_modos/{os.path.basename(html)}")
+        return [html]
+    O = preparar_caso(gamma, h, N, NA, NB, NC, dps, log)
+    log(f"   [4/4] Pétalos por {por} (2D)...")
+    os.makedirs(os.path.dirname(html), exist_ok=True)
+    graf = _modulo("graf")
+    dibujar = graf.graficar_petalos_sitio if por == "sitio" else graf.graficar_petalos
+    dibujar(regiones_para_grafica(O, N, NA, NB, NC), N, niveles, archivo=html,
+            max_modos=max_modos,
+            titulo=f"Pétalos por {por}   ({_titulo_caso(gamma, h, N, NA, NB, NC, dps)})")
+    return _anotar([html], log)
 
 
 # ---------------------------------------------------------------------------
@@ -652,6 +783,8 @@ class Consola(tk.Tk):
             ("Graficar grafos", lambda: self._iniciar_tri(correr_grafos, "grafos")),
             ("Biparticiones asociadas", lambda: self._iniciar_tri(correr_asociadas,
                                                                   "biparticiones asociadas")),
+            ("Diagonalización off-diag", lambda: self._iniciar_tri(correr_off,
+                                                                   "diagonalización off-diag")),
         ])
 
     def _pestaña_bip(self, pestañas):
@@ -661,6 +794,8 @@ class Consola(tk.Tk):
         self.estado_bip = self._botones(marco, [
             ("Graficar modos", lambda: self._iniciar_bip(correr_bip_modos, "modos")),
             ("Graficar matriz", lambda: self._iniciar_bip(correr_bip_matriz, "matriz")),
+            ("Diagonalización off-diag", lambda: self._iniciar_bip(correr_bip_off,
+                                                                   "diagonalización off-diag")),
         ])
         self._revisar_bip()
 
@@ -781,6 +916,7 @@ class Consola(tk.Tk):
         ("dps_min_critico", "dps mínimo en líneas críticas", "100", 6),
         ("max_modos", "modos (cilindro)", "30", 6),
         ("k", "k (matriz)", "8", 6),
+        ("niveles", "niveles de los pétalos (%)", "90, 99, 99.9", 14),
     ]
 
     def _pestaña_fases(self, pestañas):
@@ -789,7 +925,8 @@ class Consola(tk.Tk):
         param = ttk.LabelFrame(marco, text="Malla y precisión", padding=8)
         param.pack(fill="x")
         self.f_vars = {}
-        posiciones = [(0, 0), (0, 2), (0, 4), (1, 4), (2, 0), (2, 2), (2, 4), (1, 0), (1, 2)]
+        posiciones = [(0, 0), (0, 2), (0, 4), (1, 4), (2, 0), (2, 2), (2, 4), (1, 0), (1, 2),
+                      (3, 0)]
         for (clave, etiqueta, valor, ancho), (fila, col) in zip(self.CAMPOS_FASES, posiciones):
             ttk.Label(param, text=etiqueta).grid(row=fila, column=col, sticky="e", padx=(10, 4),
                                                  pady=3)
@@ -826,7 +963,13 @@ class Consola(tk.Tk):
             foto = tk.Label(marco_foto, background="white", foreground="#5f5e5a", text="")
             foto.pack(fill="both", expand=True)
             fotos.append(foto)
+            if c == 1:
+                marco_cil = marco_foto
         self.foto_cil, self.foto_mat = fotos
+        self.vista = "cilindro"                 # "cilindro" -> "anillo" -> "sitio" -> ...
+        self.boton_vista = ttk.Button(marco_cil, text="", width=20, command=self._cambiar_vista)
+        self._rotular_vista()
+        self.boton_vista.place(relx=1.0, rely=0.0, x=-4, y=4, anchor="ne")
         self.info_fases = ttk.Label(paneles, text="Pasa el mouse por el diagrama.")
         self.info_fases.grid(row=1, column=0, columnspan=3, sticky="w", pady=(6, 0))
 
@@ -845,7 +988,15 @@ class Consola(tk.Tk):
         return dict(N=N, NA=NA, NB=NB, NC=NC, gammas=leer_numeros(v["gammas"]),
                     hs=leer_numeros(v["hs"]), dps_nuevo=int(v["dps_nuevo"]),
                     dps_min=int(v["dps_min"]), dps_min_critico=int(v["dps_min_critico"]),
-                    max_modos=int(v["max_modos"]), k=int(v["k"]))
+                    max_modos=int(v["max_modos"]), k=int(v["k"]),
+                    niveles=self._niveles(v["niveles"]))
+
+    @staticmethod
+    def _niveles(texto):
+        niveles = tuple(sorted(x / 100.0 for x in leer_numeros(texto)))
+        if not niveles or not all(0 < l < 1 for l in niveles):
+            raise ValueError("Los niveles de los pétalos deben estar entre 0 y 100 (sin incluir).")
+        return niveles
 
     def _buscar_fases(self, silencioso=False):
         try:
@@ -860,8 +1011,7 @@ class Consola(tk.Tk):
         self.punto_actual = None
         self._dibujar_fases()
         faltan = [q for q in self.puntos if not q["listo"]]
-        sin_foto = [q for q in self.puntos if q["listo"] and not all(
-            os.path.exists(r) for r in self._rutas(q)[:2])]
+        sin_foto = [q for q in self.puntos if q["listo"] and not fotos_listas(self._rutas(q))]
         t = sum(tiempo_estimado(p["N"], *estado_caso(q["gamma"], q["h"], p["N"], p["NA"], p["NB"],
                                                      p["NC"], q["dps"])) * q["dps"] / 70.0
                 for q in faltan) + 5.0 * (len(faltan) + len(sin_foto))
@@ -879,7 +1029,23 @@ class Consola(tk.Tk):
     def _rutas(self, q):
         p = self.f_param
         return rutas_caso(q["gamma"], q["h"], p["N"], p["NA"], p["NB"], p["NC"], q["dps"],
-                          p["max_modos"], p["k"])
+                          p["max_modos"], p["k"], p["niveles"])
+
+    VISTAS = ["cilindro", "anillo", "sitio"]
+    NOMBRES_VISTA = {"cilindro": "cilindro", "anillo": "pétalos por anillo",
+                     "sitio": "pétalos por sitio"}
+
+    def _rotular_vista(self):
+        siguiente = self.VISTAS[(self.VISTAS.index(self.vista) + 1) % len(self.VISTAS)]
+        flecha = "◀" if siguiente == "cilindro" else "▶"
+        self.boton_vista.configure(text=f"{flecha} {self.NOMBRES_VISTA[siguiente]}")
+
+    def _cambiar_vista(self):
+        self.vista = self.VISTAS[(self.VISTAS.index(self.vista) + 1) % len(self.VISTAS)]
+        self._rotular_vista()
+        q, self.punto_actual = self.punto_actual, None
+        if q is not None:
+            self._mostrar_punto(q)
 
     # Coordenadas del lienzo
     def _ejes(self):
@@ -947,13 +1113,17 @@ class Consola(tk.Tk):
         q = self._mas_cercano(evento)
         if q is None or q is self.punto_actual:
             return
+        self._mostrar_punto(q)
+
+    def _mostrar_punto(self, q):
         self.punto_actual = q
         X, Y, _, _ = self._ejes()
         x, y = X(q["gamma"]), Y(q["h"])
         self.lienzo.coords(self.marca, x - 8, y - 8, x + 8, y + 8)
         self.lienzo.itemconfigure(self.marca, state="normal")
-        foto_cil, foto_mat, _ = self._rutas(q)
-        for etiqueta, ruta in ((self.foto_cil, foto_cil), (self.foto_mat, foto_mat)):
+        rutas = self._rutas(q)
+        izquierda = rutas[{"cilindro": "cil", "anillo": "pet", "sitio": "sit"}[self.vista]]
+        for etiqueta, ruta in ((self.foto_cil, izquierda), (self.foto_mat, rutas["mat"])):
             img = self._imagen(ruta) if q["listo"] else None
             etiqueta.configure(image=img or "", text="" if img else (
                 "Sin foto todavía:\nusa 'Calcular lo que falte y preparar fotos'." if q["listo"]
@@ -963,7 +1133,8 @@ class Consola(tk.Tk):
         self.info_fases.configure(
             text=f"γ = {q['gamma']},  h = {q['h']}   ·   {dps}   ·   {estado}"
                  f"{'   ·   línea crítica' if es_critico(q['gamma'], q['h']) else ''}"
-                 f"   ·   clic: abrir el cilindro 3D")
+                 f"   ·   clic: abrir "
+                 f"{'el cilindro 3D' if self.vista == 'cilindro' else 'los ' + self.NOMBRES_VISTA[self.vista] + ' (interactivos)'}")
 
     def _clic_fases(self, evento):
         q = self._mas_cercano(evento)
@@ -973,11 +1144,13 @@ class Consola(tk.Tk):
             self._escribir(f"γ={q['gamma']}, h={q['h']} todavía no está calculado.")
             return
         p = self.f_param
-        self._lanzar(correr_cilindro_punto,
+        petalos = self.vista != "cilindro"
+        self._lanzar(correr_petalos_punto if petalos else correr_cilindro_punto,
                      dict(gamma=q["gamma"], h=q["h"], N=p["N"], NA=p["NA"], NB=p["NB"],
-                          NC=p["NC"], dps=q["dps"], max_modos=p["max_modos"]),
-                     self.estado_fases, f"\n=== cilindro 3D: γ={q['gamma']}, h={q['h']}, "
-                                        f"dps={q['dps']} ===")
+                          NC=p["NC"], dps=q["dps"], max_modos=p["max_modos"],
+                          niveles=p["niveles"], por=self.vista),
+                     self.estado_fases, f"\n=== {self.NOMBRES_VISTA[self.vista]}: "
+                                        f"γ={q['gamma']}, h={q['h']}, dps={q['dps']} ===")
 
     def _iniciar_fases(self):
         p = self._buscar_fases()
@@ -1013,14 +1186,14 @@ class Consola(tk.Tk):
                 if self.detener.is_set():
                     break
                 rutas = rutas_caso(q["gamma"], q["h"], p["N"], p["NA"], p["NB"], p["NC"],
-                                   q["dps"], p["max_modos"], p["k"])
-                if all(os.path.exists(r) for r in rutas[:2]):
+                                   q["dps"], p["max_modos"], p["k"], p["niveles"])
+                if fotos_listas(rutas):
                     continue
                 nombre = f"γ={q['gamma']}, h={q['h']}"
                 self.cola.put(("estado_fases", f"Fotos {j + 1}/{len(listos)}: {nombre}"))
                 try:
                     preparar_fotos(q["gamma"], q["h"], p["N"], p["NA"], p["NB"], p["NC"],
-                                   q["dps"], p["max_modos"], p["k"])
+                                   q["dps"], p["max_modos"], p["k"], p["niveles"])
                     self._log(f"   fotos listas: {nombre} (dps{q['dps']})")
                 except Exception as e:
                     fallidos.append(f"fotos de {nombre}")
